@@ -133,6 +133,9 @@ def das_butterworth_decimate_xarray(ds_DAS_chunk, fs_target):
 
 
 def process_data(onyx_path, start_time, end_time, time_chunk, fs_target, output_dir):
+    # Add trailing slash if not present
+    if not onyx_path.endswith('/'):
+        onyx_path += '/'
     for di in datetime_range(start_time, end_time, timedelta(minutes=30)):
         print(str(di)+', current time '+str(datetime.now()))
         ds_DAS_chunk = load_h5_into_xr_chunk(onyx_path, di, time_chunk)
