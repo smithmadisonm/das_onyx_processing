@@ -13,32 +13,39 @@ def datetime_range(start, end, delta):
         yield current
         current += delta
 
+def preload_file_metadata(base_path, start_time, end_time):
+    file_metadata = []
+    for di in datetime_range(start_time, end_time, timedelta(minutes=1)):
+        path = base_path + 'decimator_' + datetime.strftime(di, '%Y-%m-%d_%H.%M') + '*.h5'
+        files = glob.glob(path)
+        for file in sorted(files):
+            with h5.File(file, 'r') as f:
+                metadata = {
+                    'file_path': file,
+                    'start_time': di,
+                    'pulse_rate': f['Acquisition'].attrs['PulseRate'],
+                    'spatial_sampling_interval': f['Acquisition'].attrs['SpatialSamplingInterval'],
+                    'shape': f['Acquisition']['Raw[0]']['RawData'].shape
+                }
+            file_metadata.append(metadata)
+    return sorted(file_metadata, key=lambda x: x['start_time'])
 
-def select_files(base_path, time_target, time_chunk):
-    files_target_chunk = []
-    chunk_range = datetime_range(time_target, time_target + timedelta(minutes=time_chunk), timedelta(minutes=1))
-    for time_temp in chunk_range:
-        path = base_path + 'decimator_' + datetime.strftime(time_temp,'%Y-%m-%d_%H.%M') +'*.h5'
-        files_target_chunk.extend(glob.glob(path))
-    return sorted(files_target_chunk)
-
-def load_h5_into_xr_chunk(files_target_chunk):
+def load_h5_into_xr_chunk(file_metadata_chunk):
     ds_DAS_chunk = None
     attrs = None
 
-    for file_path in files_target_chunk:
-        with h5.File(file_path, 'r') as f:
+    for metadata in file_metadata_chunk:
+        with h5.File(metadata['file_path'], 'r') as f:
             f_data = f['Acquisition']['Raw[0]']['RawData']
-            channels = np.arange(0, f_data.shape[1]) * f['Acquisition'].attrs['SpatialSamplingInterval']
+            channels = np.arange(0, metadata['shape'][1]) * metadata['spatial_sampling_interval']
 
-            file_timestr = os.path.basename(file_path)[10:-7]
+            file_timestr = os.path.basename(metadata['file_path'])[10:-7]
             file_datetime = datetime.strptime(file_timestr, '%Y-%m-%d_%H.%M.%S')
-            f_seconds = f_data.shape[0] / f['Acquisition'].attrs['PulseRate']
-            dt_ms = 1000000 / f['Acquisition'].attrs['PulseRate']
+            f_seconds = metadata['shape'][0] / metadata['pulse_rate']
+            dt_ms = 1000000 / metadata['pulse_rate']
 
             f_time = [dt for dt in datetime_range(file_datetime, file_datetime + timedelta(seconds=f_seconds), timedelta(microseconds=dt_ms))]
 
-            # Use memory mapping for large datasets
             data_DAS = {'strain': (['time', 'channels'], f_data, {'units': '', 'long_name': 'strain data'})}
 
             coords = {'time': (['time'], f_time), 'channels': (['channels'], channels)}
@@ -102,22 +109,29 @@ def process_data(onyx_path, start_time, end_time, time_chunk, fs_target, output_
     if not output_dir.endswith('/'):
         output_dir += '/'
 
-    for di in datetime_range(start_time, end_time, timedelta(minutes=30)):
+    print("Preloading file metadata...")
+    all_file_metadata = preload_file_metadata(onyx_path, start_time, end_time)
+    print(f"Preloaded metadata for {len(all_file_metadata)} files.")
+
+    for di in datetime_range(start_time, end_time, timedelta(minutes=time_chunk)):
         print(str(di)+', current time '+str(datetime.now()))
-        files_target_chunk = select_files(onyx_path, di, time_chunk)
         
-        if not files_target_chunk:
+        chunk_end = di + timedelta(minutes=time_chunk)
+        file_metadata_chunk = [metadata for metadata in all_file_metadata 
+                               if di <= metadata['start_time'] < chunk_end]
+        
+        if not file_metadata_chunk:
             print(f"No files found for time chunk starting at {di}")
             continue
 
-        ds_DAS_chunk = load_h5_into_xr_chunk(files_target_chunk)
+        ds_DAS_chunk = load_h5_into_xr_chunk(file_metadata_chunk)
         
         if ds_DAS_chunk is None:
             print(f"No data found for time chunk starting at {di}")
             continue
 
-        # Select exactly the 30 minutes from the full combined array
-        ds_DAS_chunk = ds_DAS_chunk.sel(time=slice(di, di+timedelta(minutes=time_chunk)))
+        # Select exactly the time_chunk minutes from the full combined array
+        ds_DAS_chunk = ds_DAS_chunk.sel(time=slice(di, chunk_end))
         
         if len(ds_DAS_chunk.time) < time_chunk * ds_DAS_chunk.attrs['PulseRate'] * 60:
             print('Warning: Missing data: '+str(len(ds_DAS_chunk.time)) + ' should be ' + str(time_chunk*ds_DAS_chunk.attrs['PulseRate']*60))
