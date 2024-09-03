@@ -1,14 +1,11 @@
-import pandas as pd
 import numpy as np
 import h5py as h5
-from matplotlib import pyplot as plt
-from datetime import date, datetime, timedelta
+from datetime import datetime, timedelta
 import xarray as xr
 import glob
 from scipy import signal
-from joblib import Parallel, delayed
-import time as tm
 import argparse
+
 
 def datetime_range(start, end, delta):
     current = start
@@ -16,65 +13,34 @@ def datetime_range(start, end, delta):
         yield current
         current += delta
 
+
+def select_files(base_path, time_target, time_chunk):
+    files_target_chunk = []
+    chunk_range = datetime_range(time_target, time_target + timedelta(minutes=time_chunk), timedelta(minutes=1))
+    for time_temp in chunk_range:
+        path = base_path + 'decimator_' + datetime.strftime(time_temp,'%Y-%m-%d_%H.%M') +'*.h5'
+        files_target_chunk.append(glob.glob(path))
+    return files_target_chunk
+
+
 def load_h5_into_xr_chunk(base_path, time_target, time_chunk):
     #file names for all files including times within the 30 min chunk
-    files_target_chunk = [glob.glob(base_path + 'decimator_' + datetime.strftime(time_temp,'%Y-%m-%d_%H.%M') +'*.h5') for time_temp in 
-           datetime_range(time_target, time_target + timedelta(minutes=time_chunk), 
-           timedelta(minutes=1))]
-    
+    files_target_chunk = select_files(base_path, time_target, time_chunk)
+
     ds_DAS_chunk = None
     attrs = None
-    
+
     for fi in files_target_chunk:
         if not fi:
             print(f"No files found for time: {time_target}")
             continue
         else:
-            f = h5.File(fi[0],'r')
+            ds_DAS_chunk, attrs = merge_datasets(ds_DAS_chunk, fi)
 
-            #data and key parameters
-            f_data = np.array(f['Acquisition']['Raw[0]']['RawData'])
-            f_sampcount = np.array(f['Acquisition']['Raw[0]']['RawDataSampleCount'])
-            channels = np.arange(0,f_data.shape[1])*f['Acquisition'].attrs['SpatialSamplingInterval']
-
-            #create actual times, where file time is in microseconds from #
-            file_timestr = fi[0].split('/')[-1][10:-7]
-            file_datetime = datetime.strptime(file_timestr, '%Y-%m-%d_%H.%M.%S')
-            f_seconds = f_data.shape[0]/f['Acquisition'].attrs['PulseRate'] #length of time, in seconds, of array
-            dt_ms = 1000000/f['Acquisition'].attrs['PulseRate'] #time in ms between each ...at 250 Hz, 4000 micros between each timestep
-
-            f_time = [dt for dt in 
-                   datetime_range(file_datetime, file_datetime + timedelta(seconds=f_seconds), 
-                   timedelta(microseconds=dt_ms))]
-
-            data_DAS = {'strain':(['time','channels'], f_data, 
-                                {'units':'',
-                               'long_name':'strain data'})}
-
-            # define coordinates
-            coords = {'time': (['time'], f_time),
-                      'channels': (['channels'], channels)}
-            #define attributes, all from hdf5 file
-            attrs = dict()
-            for fi,fi_attr in enumerate(f['Acquisition'].attrs.keys()):
-                if isinstance(f['Acquisition'].attrs[fi_attr], bytes):
-                    attrs[fi_attr] = f['Acquisition'].attrs[fi_attr].decode("utf-8")
-                else:
-                    attrs[fi_attr] = f['Acquisition'].attrs[fi_attr] 
-
-            #create dataset
-            ds_DAS = xr.Dataset(data_vars=data_DAS, 
-                            coords=coords)
-
-            if ds_DAS_chunk is None:
-                ds_DAS_chunk = ds_DAS
-            else:
-                ds_DAS_chunk = xr.merge([ds_DAS_chunk, ds_DAS])
-    
     if ds_DAS_chunk is None:
         print(f"No data found for time chunk starting at {time_target}")
         return None
-    
+
     ds_DAS_chunk = ds_DAS_chunk.assign_attrs(attrs)
 
     #select exactly the 30 minutes from the full combined array
@@ -85,12 +51,49 @@ def load_h5_into_xr_chunk(base_path, time_target, time_chunk):
 
     return ds_DAS_chunk
 
+
+def merge_datasets(ds_DAS_chunk, h5_file):
+    f = h5.File(h5_file[0],'r')
+
+    #data and key parameters
+    f_data = np.array(f['Acquisition']['Raw[0]']['RawData'])
+    channels = np.arange(0,f_data.shape[1])*f['Acquisition'].attrs['SpatialSamplingInterval']
+
+    #create actual times, where file time is in microseconds from #
+    file_timestr = h5_file[0].split('/')[-1][10:-7]
+    file_datetime = datetime.strptime(file_timestr, '%Y-%m-%d_%H.%M.%S')
+    f_seconds = f_data.shape[0]/f['Acquisition'].attrs['PulseRate'] #length of time, in seconds, of array
+    dt_ms = 1000000/f['Acquisition'].attrs['PulseRate'] #time in ms between each ...at 250 Hz, 4000 micros between each timestep
+
+    f_time = [dt for dt in datetime_range(file_datetime, file_datetime + timedelta(seconds=f_seconds), timedelta(microseconds=dt_ms))]
+
+    data_DAS = {'strain':(['time','channels'], f_data, {'units':'', 'long_name':'strain data'})}
+
+    # define coordinates
+    coords = {'time': (['time'], f_time), 'channels': (['channels'], channels)}
+    #define attributes, all from hdf5 file
+    attrs = dict()
+    for h5_file,fi_attr in enumerate(f['Acquisition'].attrs.keys()):
+        if isinstance(f['Acquisition'].attrs[fi_attr], bytes):
+            attrs[fi_attr] = f['Acquisition'].attrs[fi_attr].decode("utf-8")
+        else:
+            attrs[fi_attr] = f['Acquisition'].attrs[fi_attr]
+
+    #create dataset
+    ds_DAS = xr.Dataset(data_vars=data_DAS, coords=coords)
+
+    if ds_DAS_chunk is None:
+        ds_DAS_chunk = ds_DAS
+    else:
+        ds_DAS_chunk = xr.merge([ds_DAS_chunk, ds_DAS])
+    return ds_DAS_chunk,attrs
+
+
 def das_butterworth_decimate_xarray(ds_DAS_chunk, fs_target):
-    
     #“t_inc" parameter is the an integer representing the multiples you need to downsample
     #where fs is the original sampling rate and 50 is the frequency you want
     fs = ds_DAS_chunk.attrs['PulseRate']
-    t_inc = int(fs/fs_target) 
+    t_inc = int(fs/fs_target)
 
     #initialize empty nan array for decimated data
     ds_DAS_deci = np.empty((len(ds_DAS_chunk.time[0::t_inc]),len(ds_DAS_chunk.channels)))
@@ -98,7 +101,7 @@ def das_butterworth_decimate_xarray(ds_DAS_chunk, fs_target):
 
     #butterworth filter, use for surface waves
 
-    #define butterworth filter 
+    #define butterworth filter
     cutoff = fs_target #desire cutoff frequency of filter, Hz
     nyq = 0.5*fs #nyquist frequency
     order = 1
@@ -136,6 +139,9 @@ def process_data(onyx_path, start_time, end_time, time_chunk, fs_target, output_
     # Add trailing slash if not present
     if not onyx_path.endswith('/'):
         onyx_path += '/'
+    if not output_dir.endswith('/'):
+        output_dir += '/'
+
     for di in datetime_range(start_time, end_time, timedelta(minutes=30)):
         print(str(di)+', current time '+str(datetime.now()))
         ds_DAS_chunk = load_h5_into_xr_chunk(onyx_path, di, time_chunk)
