@@ -95,31 +95,25 @@ def das_butterworth_decimate_xarray(ds_DAS_chunk, fs_target):
     fs = ds_DAS_chunk.attrs['PulseRate']
     t_inc = int(fs/fs_target)
 
-    #initialize empty nan array for decimated data
-    ds_DAS_deci = np.empty((len(ds_DAS_chunk.time[0::t_inc]),len(ds_DAS_chunk.channels)))
-    ds_DAS_deci[:] = np.nan
-
-    #butterworth filter, use for surface waves
-
-    #define butterworth filter
-    cutoff = fs_target #desire cutoff frequency of filter, Hz
-    nyq = 0.5*fs #nyquist frequency
+    # Define butterworth filter
+    cutoff = fs_target
+    nyq = 0.5 * fs
     order = 1
-    normal_cutoff = cutoff/nyq
-    b_butter, a_butter = signal.butter(order,normal_cutoff,btype='low',analog=False)
+    normal_cutoff = cutoff / nyq
+    b_butter, a_butter = signal.butter(order, normal_cutoff, btype='low', analog=False)
 
-    for i, ci in enumerate(ds_DAS_chunk.channels.values):
-        strain = ds_DAS_chunk.strain.transpose().values[i]
-        strain_butter = signal.filtfilt(b_butter, a_butter, strain)
-        strain_deci_butter = strain_butter[::t_inc]
-        ds_DAS_deci[:,i] = strain_deci_butter
+    # Apply the filter to the entire strain data at once
+    strain_data = ds_DAS_chunk.strain.values
+    strain_butter = signal.filtfilt(b_butter, a_butter, strain_data, axis=0)
+    
+    # Decimate the filtered data
+    ds_DAS_deci = strain_butter[::t_inc, :]
 
     attrs_deci = ds_DAS_chunk.attrs.copy()
     attrs_deci['PulseRateDecimated'] = fs_target
     attrs_deci['DecimationFilterType'] = 'butterworth'
 
-    # Ensure time values are numpy array
-    time_values = ds_DAS_chunk.time.values[0::t_inc]
+    time_values = ds_DAS_chunk.time.values[::t_inc]
     
     coords = {
         'time': ('time', time_values),
@@ -127,7 +121,7 @@ def das_butterworth_decimate_xarray(ds_DAS_chunk, fs_target):
     }
 
     data_deci = {
-        'strain': (['time','channels'], ds_DAS_deci, {'units':'', 'long_name':'decimated strain data'})
+        'strain': (['time', 'channels'], ds_DAS_deci, {'units': '', 'long_name': 'decimated strain data'})
     }
     
     strain_deci_butter_all = xr.Dataset(data_vars=data_deci, coords=coords, attrs=attrs_deci)
