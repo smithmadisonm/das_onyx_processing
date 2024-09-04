@@ -35,7 +35,7 @@ def load_h5_into_xr_chunk(file_metadata_chunk):
     attrs = None
 
     for metadata in file_metadata_chunk:
-        with h5.File(metadata['file_path'], 'r') as f:
+        with h5.File(metadata['file_path'], 'r', driver='core', backing_store=False) as f:
             f_data = f['Acquisition']['Raw[0]']['RawData']
             channels = np.arange(0, metadata['shape'][1]) * metadata['spatial_sampling_interval']
 
