@@ -6,6 +6,8 @@ import glob
 from scipy import signal
 import argparse
 import os
+import multiprocessing as mp
+from functools import partial
 
 def datetime_range(start, end, delta):
     current = start
@@ -19,7 +21,7 @@ class FileCollection:
 
     def add_file(self, file_path):
         if file_path not in self.files:
-            self.files[file_path] = h5.File(file_path, mode='r')
+            self.files[file_path] = h5.File(file_path, driver="core", mode='r', backing_store=False)
 
     def get_file(self, file_path):
         return self.files.get(file_path)
@@ -83,13 +85,14 @@ def load_h5_into_xr_chunk(file_metadata_chunk):
 
     return ds_DAS_chunk
 
-def das_butterworth_decimate_xarray(ds_DAS_chunk, fs_target):
-    #“t_inc" parameter is the an integer representing the multiples you need to downsample
-    #where fs is the original sampling rate and 50 is the frequency you want
+def process_channel(channel_data, b_butter, a_butter, t_inc):
+    filtered_channel = signal.filtfilt(b_butter, a_butter, channel_data)
+    return filtered_channel[::t_inc]
+
+def das_butterworth_decimate_xarray(ds_DAS_chunk, fs_target, n_jobs=None):
     fs = ds_DAS_chunk.attrs['PulseRate']
     t_inc = int(fs/fs_target)
 
-    # Define butterworth filter
     cutoff = fs_target
     nyq = 0.5 * fs
     order = 1
@@ -97,10 +100,20 @@ def das_butterworth_decimate_xarray(ds_DAS_chunk, fs_target):
     b_butter, a_butter = signal.butter(order, normal_cutoff, btype='low', analog=False)
 
     strain_data = ds_DAS_chunk.strain.values
-    strain_butter = signal.filtfilt(b_butter, a_butter, strain_data, axis=0)
-    
-    # Decimate the filtered data
-    ds_DAS_deci = strain_butter[::t_inc, :]
+
+    # Determine the number of processes to use
+    if n_jobs is None:
+        n_jobs = mp.cpu_count()
+
+    # Create a partial function with fixed parameters
+    process_func = partial(process_channel, b_butter=b_butter, a_butter=a_butter, t_inc=t_inc)
+
+    # Use multiprocessing to apply the filter to each channel
+    with mp.Pool(processes=n_jobs) as pool:
+        results = pool.map(process_func, strain_data.T)
+
+    # Combine the results
+    ds_DAS_deci = np.array(results).T
 
     attrs_deci = ds_DAS_chunk.attrs.copy()
     attrs_deci['PulseRateDecimated'] = fs_target
@@ -122,7 +135,7 @@ def das_butterworth_decimate_xarray(ds_DAS_chunk, fs_target):
     return strain_deci_butter_all
 
 
-def process_data(onyx_path, start_time, end_time, time_chunk, fs_target, output_dir):
+def process_data(onyx_path, start_time, end_time, time_chunk, fs_target, output_dir, n_jobs):
     if not onyx_path.endswith('/'):
         onyx_path += '/'
     if not output_dir.endswith('/'):
@@ -156,7 +169,7 @@ def process_data(onyx_path, start_time, end_time, time_chunk, fs_target, output_
             if len(ds_DAS_chunk.time) < time_chunk * ds_DAS_chunk.attrs['PulseRate'] * 60:
                 print('Warning: Missing data: '+str(len(ds_DAS_chunk.time)) + ' should be ' + str(time_chunk*ds_DAS_chunk.attrs['PulseRate']*60))
 
-            strain_deci_butter_all = das_butterworth_decimate_xarray(ds_DAS_chunk, fs_target)
+            strain_deci_butter_all = das_butterworth_decimate_xarray(ds_DAS_chunk, fs_target, n_jobs)
 
             output_file = f'{output_dir}Onyx_{di.strftime("%Y-%m-%d_%H.%M")}_{fs_target}hz.nc'
             strain_deci_butter_all.to_netcdf(output_file)
@@ -172,13 +185,14 @@ def main():
     parser.add_argument("output_dir", type=str, help="Output directory for processed files")
     parser.add_argument("--time_chunk", type=int, default=30, help="Time chunk in minutes")
     parser.add_argument("--fs_target", type=int, default=5, help="Target frequency in Hz")
+    parser.add_argument("--jobs", type=int, default=None, help="Number of parallel jobs to run")
 
     args = parser.parse_args()
 
     start_time = datetime.strptime(args.start_time, "%Y-%m-%d %H:%M")
     end_time = datetime.strptime(args.end_time, "%Y-%m-%d %H:%M")
 
-    process_data(args.onyx_path, start_time, end_time, args.time_chunk, args.fs_target, args.output_dir)
+    process_data(args.onyx_path, start_time, end_time, args.time_chunk, args.fs_target, args.output_dir, args.jobs)
 
 if __name__ == "__main__":
     main()
