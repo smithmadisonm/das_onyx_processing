@@ -53,7 +53,7 @@ def load_h5_into_xr_chunk(file_metadata_chunk):
             data_DAS = {'strain': (['time', 'channels'], f_data, {'units': '', 'long_name': 'strain data'})}
 
             coords = {'time': (['time'], f_time), 'channels': (['channels'], channels)}
-            
+
             attrs = {k: v.decode("utf-8") if isinstance(v, bytes) else v for k, v in f['Acquisition'].attrs.items()}
 
             ds_DAS = xr.Dataset(data_vars=data_DAS, coords=coords)
@@ -88,7 +88,7 @@ def das_butterworth_decimate_xarray(ds_DAS_chunk, fs_target):
     attrs_deci['DecimationFilterType'] = 'butterworth'
 
     time_values = ds_DAS_chunk.time.values[::t_inc]
-    
+
     coords = {
         'time': ('time', time_values),
         'channels': ('channels', ds_DAS_chunk.channels.values)
@@ -97,31 +97,31 @@ def das_butterworth_decimate_xarray(ds_DAS_chunk, fs_target):
     data_deci = {
         'strain': (['time', 'channels'], ds_DAS_deci, {'units': '', 'long_name': 'decimated strain data'})
     }
-    
+
     strain_deci_butter_all = xr.Dataset(data_vars=data_deci, coords=coords, attrs=attrs_deci)
 
     return strain_deci_butter_all
 
 def process_time_chunk(di, time_chunk, all_file_metadata, fs_target, output_dir):
     print(f"Processing chunk starting at {di}, current time {datetime.now()}")
-    
+
     chunk_end = di + timedelta(minutes=time_chunk)
     file_metadata_chunk = [metadata for metadata in all_file_metadata 
                            if di <= metadata['start_time'] < chunk_end]
-    
+
     if not file_metadata_chunk:
         print(f"No files found for time chunk starting at {di}")
         return
 
     ds_DAS_chunk = load_h5_into_xr_chunk(file_metadata_chunk)
-    
+
     if ds_DAS_chunk is None:
         print(f"No data found for time chunk starting at {di}")
         return
 
     # Select exactly the time_chunk minutes from the full combined array
     ds_DAS_chunk = ds_DAS_chunk.sel(time=slice(di, chunk_end))
-    
+
     if len(ds_DAS_chunk.time) < time_chunk * ds_DAS_chunk.attrs['PulseRate'] * 60:
         print(f'Warning: Missing data: {len(ds_DAS_chunk.time)} should be {time_chunk*ds_DAS_chunk.attrs["PulseRate"]*60}')
 
